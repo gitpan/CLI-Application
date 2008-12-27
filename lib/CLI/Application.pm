@@ -4,13 +4,18 @@ package CLI::Application;
 use strict;
 use warnings;
 
-use Attribute::Handlers;
-use Text::Table;
+
 use Carp;
+
+use Text::Table;
+
+use Attribute::Handlers;
+
 use Module::Pluggable;
 use Module::Load;
 
-our $VERSION = '0.02';
+
+our $VERSION = '0.03';
 
 our %ACTION;
 our $FALLBACK;
@@ -23,33 +28,45 @@ sub new {
 }
 
 
+# Take a list of command line arguments and prepare the application for
+# execution by parsing options, detecting the action to perform, loading
+# plugins and so on.
 sub prepare {
 	my ($self, @argv) = @_;
 
 	my $wanted = $self->{options} || [];
 	my @rest;
 	my %option;
+	my $class = ref $self;
 
+	# Get list of available plugins.
 	my %plugin = map { $_ => 0 } $self->plugins;
 
 	$self->{plugged} = {};
 
 	# Load plugins.
 	if($self->{plugins}) {
-		for my $plugin (@{$self->{plugins}}) {
-			my $package = ref($self) . '::Plugin';
-			$plugin = ref($self) . '::Plugin::' . $plugin if($plugin !~ /^$package/);
+		while(my ($plugin, $param) = each %{$self->{plugins}}) {
+			my $package = $class . '::Plugin';
+
+			# Allow leaving 'CLI::Application::Plugin::' away.
+			if($plugin !~ /^$package/) {
+				$plugin = $class . '::Plugin::' . $plugin;
+			}
 
 			die "Plugin $plugin not found.\n" unless exists($plugin{$plugin});
 
 			load $plugin;
 
-			my $instance = $plugin->new;
+			my $instance = $plugin->new(%$param);
 
+			# Assign the instance of the plugin to each exported method.
 			$self->{plugged}->{$_} = $instance for($plugin->export);
 		}
 	}
 
+
+	# Parse options from command line arguments.
 	while(my $arg = shift(@argv)) {
 
 		# Save non-option arguments.
@@ -128,22 +145,14 @@ sub prepare {
 		}
 	}
 
-	my $command = (shift @rest) || $FALLBACK;
+	$self->{parsed} = \%option;
+	$self->{rest} = \@rest;
 
-	die $self->usage("No action.") unless $command;
-
-	if($ACTION{$command}) {
-		$self->action($command);
-
-		$self->{parsed} = \%option;
-		$self->{rest} = \@rest;
-	}
-	else {
-		die $self->usage("No such command.");
-	}
+	delete $self->{action};
 }
 
 
+# Take an error message and print it together with our usage information.
 sub usage {
 	my ($self, @message) = @_;
 
@@ -156,6 +165,7 @@ sub usage {
 }
 
 
+# Return (and set) the action we're going to dispatch to.
 sub action {
 	my ($self, $action) = @_;
 
@@ -163,12 +173,28 @@ sub action {
 		die "Unknown action '$action'.\n";
 	}
 
-	$self->{action} = $action if(defined $action);
+	if(defined $action) {
+		$self->{action} = $action;
+	}
+	elsif(!$self->{action}) {
+		# Get command from remaining arguments or take default action.
+		my $command = (shift @{$self->{rest}}) || $FALLBACK;
+
+		die $self->usage("No action.") unless $command;
+
+		if($ACTION{$command}) {
+			$self->{action} = $command;
+		}
+		else {
+			die $self->usage("No such command.");
+		}
+	}
 
 	return $self->{action};
 }
 
 
+# Return (and set) the value of an option.
 sub option {
 	my ($self, $option, $argument) = @_;
 
@@ -180,6 +206,8 @@ sub option {
 }
 
 
+# Dispatch to the given action or the action parsed from command line
+# arguments.
 sub dispatch {
 	my ($self, $action) = @_;
 
@@ -193,12 +221,16 @@ sub dispatch {
 }
 
 
+# Return the applications name.
 sub name { $_[0]->{name} }
 
 
+# Return anything from the command line that's left after parsing options and
+# commands.
 sub arguments { return @{$_[0]->{rest}} }
 
 
+# Generate a help message with all valid commands and options and return it.
 sub _usage {
 	my ($self) = @_;
 
@@ -221,10 +253,11 @@ sub _usage {
 }
 
 
+# Return a formatted table of valid options using Text::Table.
 sub _option_usage {
 	my ($self) = @_;
 
-	if(@{$self->{options}}) {
+	if($self->{options} and @{$self->{options}}) {
 		my $table = new Text::Table;
 
 		for my $option (@{$self->{options}}) {
@@ -266,6 +299,8 @@ sub _option_usage {
 }
 
 
+# Searches the options array for an option matching the given string and
+# returns the first option that has a matching option flag.
 sub _option {
 	my ($self, $needle) = @_;
 
@@ -279,6 +314,8 @@ sub _option {
 }
 
 
+# Take an option from the arguments hash and a value from the command line,
+# check if the value is vaid for the option.
 sub _validate_option {
 	my ($self, $validate, $value) = @_;
 
@@ -308,6 +345,7 @@ sub _validate_option {
 }
 
 
+# Attribute to mark functions as commands.
 sub UNIVERSAL::Command : ATTR(CODE) {
 	my ($package, $symbol, $code, $attribute, $data, $phase) = @_;
 
@@ -320,6 +358,7 @@ sub UNIVERSAL::Command : ATTR(CODE) {
 }
 
 
+# Attribute to mark a default command.
 sub UNIVERSAL::Fallback : ATTR(CODE) {
 	my ($package, $symbol, $code, $attribute, $data, $phase) = @_;
 
@@ -327,6 +366,7 @@ sub UNIVERSAL::Fallback : ATTR(CODE) {
 }
 
 
+# AUTOLOAD method to call plugin methods.
 sub AUTOLOAD {
 	my $self = shift;
 
@@ -460,11 +500,11 @@ B<CLI::Application> will die with an error.
 
 =item B<option>(option, argument)
 
-This is the getter/setter for options. DON'T USE BEFORE A CALL TO B<prepare>.
+This is the getter/setter for options.
 
 =item B<arguments>
 
-Returns a list of arguments. DON'T USE BEFORE A CALL TO B<prepare>.
+Returns a list of arguments.
 
 =item B<action>(action)
 
